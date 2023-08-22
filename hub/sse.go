@@ -2,7 +2,6 @@ package hub
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"io"
@@ -29,7 +28,7 @@ func (hub *Hub) initRoute() {
 		cors.AllowCredentials = true
 		return cors
 	}()))
-	hub.Use(extractPubkey)
+	hub.Use(auth)
 	hub.Use(middleware.RateLimiterWithConfig(middleware.RateLimiterConfig{
 		Skipper: middleware.DefaultSkipper,
 		Store: middleware.NewRateLimiterMemoryStoreWithConfig(
@@ -40,15 +39,12 @@ func (hub *Hub) initRoute() {
 			},
 		),
 		IdentifierExtractor: func(c echo.Context) (string, error) {
-			pubkey := c.Get("pubkey").([]byte)
-			id := hex.EncodeToString(pubkey)
-			c.Set("whoami", id)
-			return id, nil
+			return c.QueryParam("pubkey"), nil
 		},
 	}))
 
 	var app *SSE = &SSE{rdb: hub.rdb}
-	hub.GET("/", app.Subscribe, auth)
+	hub.GET("/", app.Subscribe)
 	hub.POST("/", app.HandleCall)
 	hub.DELETE("/", app.FinishCall)
 }
@@ -60,7 +56,7 @@ type SSE struct {
 func (app *SSE) Subscribe(c echo.Context) (err error) {
 	defer err2.Handle(&err)
 	ctx := c.Request().Context()
-	pid := "peer-" + c.Get("whoami").(string)
+	pid := "peer-" + c.QueryParam("pubkey")
 	sub := app.rdb.Subscribe(ctx, pid)
 	defer sub.Close()
 
@@ -89,14 +85,14 @@ func (app *SSE) HandleCall(c echo.Context) (err error) {
 	defer err2.Handle(&err)
 	rdb := app.rdb
 
-	data, _ := try.To2(verifyData(c))
+	data := try.To1(io.ReadAll(c.Request().Body))
 
 	ctx := c.Request().Context()
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 
-	peerPubkey := try.To1(parseURLPubkey(c.QueryParam("peer")))
-	pid := "peer-" + hex.EncodeToString(peerPubkey)
+	try.To1(parsePubkey(c.QueryParam("peer")))
+	pid := "peer-" + c.QueryParam("peer")
 	countMap := try.To1(rdb.PubSubNumSub(ctx, pid).Result())
 	if countMap[pid] == 0 {
 		return echo.NewHTTPError(http.StatusNotFound)
@@ -127,29 +123,10 @@ func (app *SSE) FinishCall(c echo.Context) (err error) {
 		return c.NoContent(http.StatusGone)
 	}
 
-	data, _ := try.To2(verifyData(c))
+	data := try.To1(io.ReadAll(c.Request().Body))
 	try.To(app.rdb.Publish(ctx, eid, data).Err())
 
 	return c.NoContent(http.StatusNoContent)
-}
-
-func extractPubkey(next echo.HandlerFunc) echo.HandlerFunc {
-	return func(c echo.Context) error {
-		pubkey, err := parseURLPubkey(c.QueryParam("pubkey"))
-		if err != nil {
-			return err
-		}
-		c.Set("pubkey", pubkey)
-		return next(c)
-	}
-}
-
-func parseURLPubkey(s string) (pubkey []byte, err error) {
-	pubkey = try.To1(base64.RawURLEncoding.DecodeString(s))
-	if len(pubkey) != 32 {
-		return nil, echo.NewHTTPError(http.StatusBadRequest, ErrNotWireGuardPubkey)
-	}
-	return
 }
 
 func auth(next echo.HandlerFunc) echo.HandlerFunc {
@@ -161,8 +138,8 @@ func auth(next echo.HandlerFunc) echo.HandlerFunc {
 			return echo.NewHTTPError(http.StatusBadRequest, ErrSignatureExpired)
 		}
 
-		pubkey := x25519.PublicKey(c.Get("pubkey").([]byte))
-		signature := try.To1(base64.RawURLEncoding.DecodeString(c.QueryParam("signature")))
+		pubkey := try.To1(parsePubkey(c.QueryParam("pubkey")))
+		signature := try.To1(hex.DecodeString(c.QueryParam("signature")))
 		msg := []byte(c.QueryParam("timestamp"))
 		if verified := x25519.Verify(pubkey, msg, signature); !verified {
 			return echo.NewHTTPError(http.StatusUnauthorized, ErrNotWireGuardPubkey)
@@ -172,17 +149,11 @@ func auth(next echo.HandlerFunc) echo.HandlerFunc {
 	}
 }
 
-func verifyData(c echo.Context) (data []byte, pubkeyRaw []byte, err error) {
-	defer err2.Handle(&err)
-
-	pubkey := x25519.PublicKey(c.Get("pubkey").([]byte))
-	signature := try.To1(base64.RawURLEncoding.DecodeString(c.QueryParam("signature")))
-	data = try.To1(io.ReadAll(c.Request().Body))
-	if verified := x25519.Verify(pubkey, data, signature); !verified {
-		err2.Throwf("%w", echo.NewHTTPError(http.StatusBadRequest, ErrSignatureVerifyFailed))
+func parsePubkey(s string) (pubkey x25519.PublicKey, err error) {
+	if len(s) != 64 {
+		return nil, echo.NewHTTPError(http.StatusBadRequest, ErrNotWireGuardPubkey)
 	}
-
-	return
+	return hex.DecodeString(s)
 }
 
 var ErrNotWireGuardPubkey = errors.New("pubkey is not WireGuard pubkey")
