@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"net"
 	"net/http"
 	"os"
 
@@ -18,6 +19,8 @@ var cfg struct {
 	addr    string
 	version string
 }
+
+const listenAddrSavedFile = ".xhe-hub-addr"
 
 // rootCmd represents the base command when called without any subcommands
 var rootCmd = &cobra.Command{
@@ -37,7 +40,10 @@ var rootCmd = &cobra.Command{
 				return next(c)
 			}
 		})
-		try.To(e.Start(cfg.addr))
+		l := try.To1(net.Listen("tcp", cfg.addr))
+		defer l.Close()
+		try.To(os.WriteFile(listenAddrSavedFile, []byte(l.Addr().String()), os.ModePerm))
+		try.To(http.Serve(l, e))
 	},
 }
 
