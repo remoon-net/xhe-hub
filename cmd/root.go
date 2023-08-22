@@ -1,9 +1,12 @@
 package cmd
 
 import (
+	"encoding/json"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
+	"strconv"
 
 	"github.com/labstack/echo/v5"
 	"github.com/lainio/err2"
@@ -18,6 +21,7 @@ var cfg struct {
 	redis   string
 	addr    string
 	version string
+	logLv   string
 }
 
 const listenAddrSavedFile = ".xhe-hub-addr"
@@ -28,6 +32,18 @@ var rootCmd = &cobra.Command{
 	Short: "",
 	Long:  ``,
 	Run: func(cmd *cobra.Command, args []string) {
+		func() {
+			var lv slog.Level
+			b := strconv.AppendQuote(nil, cfg.logLv)
+			try.To(json.Unmarshal(b, &lv))
+			opts := &slog.HandlerOptions{
+				Level: lv,
+			}
+			handler := slog.NewJSONHandler(os.Stderr, opts)
+			logger := slog.New(handler)
+			slog.SetDefault(logger)
+		}()
+
 		opts := try.To1(redis.ParseURL(cfg.redis))
 		rdb := redis.NewClient(opts)
 		e := hub.New(rdb)
@@ -43,6 +59,9 @@ var rootCmd = &cobra.Command{
 		l := try.To1(net.Listen("tcp", cfg.addr))
 		defer l.Close()
 		try.To(os.WriteFile(listenAddrSavedFile, []byte(l.Addr().String()), os.ModePerm))
+		slog.Warn("server start",
+			"addr", l.Addr().String(),
+		)
 		try.To(http.Serve(l, e))
 	},
 }
@@ -57,6 +76,8 @@ func Execute(version string) {
 }
 
 func init() {
+	rootCmd.PersistentFlags().StringVar(&cfg.logLv, "log", "info", "log level")
+
 	rootCmd.Flags().StringVar(&cfg.redis, "redis", "redis://localhost/1", "redis connect url")
 	rootCmd.Flags().StringVar(&cfg.addr, "addr", ":8090", "listen addr")
 }
