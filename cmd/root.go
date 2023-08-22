@@ -47,18 +47,12 @@ var rootCmd = &cobra.Command{
 		opts := try.To1(redis.ParseURL(cfg.redis))
 		rdb := redis.NewClient(opts)
 		e := hub.New(rdb)
-		e.Pre(func(next echo.HandlerFunc) echo.HandlerFunc {
-			return func(c echo.Context) error {
-				path := c.Request().URL.Path
-				if path == "/health" {
-					return HealthCheckHandle(rdb, c)
-				}
-				return next(c)
-			}
-		})
+		// e.GET("/health", func(c echo.Context) error {
+		// 	return HealthCheckHandle(rdb, c)
+		// })
 		l := try.To1(net.Listen("tcp", cfg.addr))
 		defer l.Close()
-		try.To(os.WriteFile(listenAddrSavedFile, []byte(l.Addr().String()), os.ModePerm))
+		// try.To(os.WriteFile(listenAddrSavedFile, []byte(l.Addr().String()), os.ModePerm))
 		slog.Warn("server start",
 			"addr", l.Addr().String(),
 		)
